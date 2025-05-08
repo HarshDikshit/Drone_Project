@@ -1,217 +1,156 @@
 #include <Arduino.h>
-#include <Wire.h>
-#include "ComplementaryFilter.h"
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
+#include <AsyncTCP.h>
+#include <ArduinoJson.h>
+#include <SPIFFS.h>
+#include "MPU6050Sensor.h"
+#include "DroneController.h"
 
-// MPU-6050 I2C address and register definitions
-#define MPU6050_ADDR 0x68
-#define MPU6050_PWR_MGMT_1 0x6B
-#define MPU6050_ACCEL_XOUT_H 0x3B
-#define MPU6050_GYRO_XOUT_H 0x43
-#define MPU6050_ACCEL_CONFIG 0x1C
-#define MPU6050_GYRO_CONFIG 0x1B
+// WiFi AP credentials
+const char* ssid = "DroneControlAP";
+const char* password = "drone1234";
 
-// I2C pins for NodeMCU-32S
-#define SDA_PIN 21
-#define SCL_PIN 22
+// Web server and WebSocket
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
 
-// Sensor scaling factors (based on MPU-6050 settings)
-#define ACCEL_SCALE 16384.0f // ±2g range, LSB/g
-#define GYRO_SCALE 131.0f    // ±250 deg/s range, LSB/(deg/s)
+// Sensor and controller
+MPU6050Sensor sensor(100.0f, 0.989f);
+DroneController drone(100.0f);
 
-// Calibration offsets (based on stationary data)
-#define ACCEL_X_OFFSET 0.0532f
-#define ACCEL_Y_OFFSET -0.0181f
-#define ACCEL_Z_OFFSET -1.2078f
+// Control inputs
+float rollSetpoint = 0.0f, pitchSetpoint = 0.0f, throttle = 0.0f, yawSetpoint = 0.0f;
 
-ComplementaryFilter filter(100.0f, 0.989f); // 100 Hz, alpha=0.7
+void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
+    AwsFrameInfo *info = (AwsFrameInfo*)arg;
+    if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
+        data[len] = 0;
+        DynamicJsonDocument doc(512);
+        deserializeJson(doc, data);
 
-bool initMPU6050() {
-    Wire.begin(SDA_PIN, SCL_PIN);
-    Wire.beginTransmission(MPU6050_ADDR);
-    Wire.write(MPU6050_PWR_MGMT_1);
-    Wire.write(0x00); // Wake up MPU-6050
-    if (Wire.endTransmission(true) != 0) {
-        return false;
-    }
-
-    Wire.beginTransmission(MPU6050_ADDR);
-    Wire.write(MPU6050_ACCEL_CONFIG);
-    Wire.write(0x00); // AFS_SEL=0
-    if (Wire.endTransmission(true) != 0) {
-        return false;
-    }
-
-    Wire.beginTransmission(MPU6050_ADDR);
-    Wire.write(MPU6050_GYRO_CONFIG);
-    Wire.write(0x00); // FS_SEL=0
-    if (Wire.endTransmission(true) != 0) {
-        return false;
-    }
-
-    return true;
-}
-
-bool readMPU6050(float& ax, float& ay, float& az, float& gx, float& gy, float& gz, float gxOffset, float gyOffset, float gzOffset) {
-    static int16_t lastAccelX = 0, lastAccelY = 0, lastAccelZ = 0;
-    static int16_t lastGyroX = 0, lastGyroY = 0, lastGyroZ = 0;
-
-    Wire.beginTransmission(MPU6050_ADDR);
-    Wire.write(MPU6050_ACCEL_XOUT_H);
-    if (Wire.endTransmission(false) != 0) {
-        return false;
-    }
-
-    Wire.requestFrom((uint8_t)MPU6050_ADDR, (size_t)14, true); // Read 14 bytes
-    if (Wire.available() < 14) {
-        return false;
-    }
-
-    int16_t accelX = (Wire.read() << 8) | Wire.read();
-    int16_t accelY = (Wire.read() << 8) | Wire.read();
-    int16_t accelZ = (Wire.read() << 8) | Wire.read();
-    Wire.read(); Wire.read(); // Skip temperature
-    int16_t gyroX = (Wire.read() << 8) | Wire.read();
-    int16_t gyroY = (Wire.read() << 8) | Wire.read();
-    int16_t gyroZ = (Wire.read() << 8) | Wire.read();
-
-    if (accelX == lastAccelX && accelY == lastAccelY && accelZ == lastAccelZ &&
-        gyroX == lastGyroX && gyroY == lastGyroY && gyroZ == lastGyroZ) {
-        Serial.println("Warning: Sensor readings unchanged");
-        return false;
-    }
-
-    lastAccelX = accelX;
-    lastAccelY = accelY;
-    lastAccelZ = accelZ;
-    lastGyroX = gyroX;
-    lastGyroY = gyroY;
-    lastGyroZ = gyroZ;
-
-    ax = (accelX / ACCEL_SCALE) - ACCEL_X_OFFSET;
-    ay = (accelY / ACCEL_SCALE) - ACCEL_Y_OFFSET;
-    az = (accelZ / ACCEL_SCALE) - ACCEL_Z_OFFSET;
-    gx = (gyroX / GYRO_SCALE) - gxOffset;
-    gy = (gyroY / GYRO_SCALE) - gyOffset;
-    gz = (gyroZ / GYRO_SCALE) - gzOffset;
-
-    static unsigned long lastDebug = 0;
-    if (millis() - lastDebug >= 500) {
-        Serial.print("Raw Accel: "); Serial.print(accelX); Serial.print(", ");
-        Serial.print(accelY); Serial.print(", "); Serial.println(accelZ);
-        Serial.print("Raw Gyro: "); Serial.print(gyroX); Serial.print(", ");
-        Serial.print(gyroY); Serial.print(", "); Serial.println(gyroZ);
-        Serial.print("Converted Accel (g): "); Serial.print(ax, 4); Serial.print(", ");
-        Serial.print(ay, 4); Serial.print(", "); Serial.println(az, 4);
-        Serial.print("Converted Gyro (deg/s): "); Serial.print(gx, 4); Serial.print(", ");
-        Serial.print(gy, 4); Serial.print(", "); Serial.println(gz, 4);
-        lastDebug = millis();
-    }
-
-    return true;
-}
-
-void calibrateGyro(float& gxOffset, float& gyOffset, float& gzOffset) {
-    Serial.println("Calibrating gyroscope...");
-    float gxSum = 0.0f, gySum = 0.0f, gzSum = 0.0f;
-    int samples = 200;
-    int validSamples = 0;
-
-    for (int i = 0; i < samples; i++) {
-        float ax, ay, az, gx, gy, gz;
-        if (readMPU6050(ax, ay, az, gx, gy, gz, 0.0f, 0.0f, 0.0f)) {
-            gxSum += gx;
-            gySum += gy;
-            gzSum += gz;
-            validSamples++;
+        // Parse joystick inputs
+        if (doc.containsKey("throttle")) {
+            throttle = doc["throttle"];
         }
-        delay(10);
-    }
+        if (doc.containsKey("yaw")) {
+            yawSetpoint = doc["yaw"];
+        }
+        if (doc.containsKey("roll")) {
+            rollSetpoint = doc["roll"];
+        }
+        if (doc.containsKey("pitch")) {
+            pitchSetpoint = doc["pitch"];
+        }
 
-    if (validSamples > 0) {
-        gxOffset = gxSum / validSamples;
-        gyOffset = gySum / validSamples;
-        gzOffset = gzSum / validSamples;
-        Serial.print("Gyro offsets: ");
-        Serial.print(gxOffset, 4); Serial.print(", ");
-        Serial.print(gyOffset, 4); Serial.print(", ");
-        Serial.println(gzOffset, 4);
-    } else {
-        Serial.println("Calibration failed: No valid samples");
-        gxOffset = gyOffset = gzOffset = 0.0f;
+        // Parse PID tunings
+        if (doc.containsKey("kpRoll")) {
+            float kpRoll = doc["kpRoll"];
+            float kiRoll = doc["kiRoll"];
+            float kdRoll = doc["kdRoll"];
+            float kpPitch = doc["kpPitch"];
+            float kiPitch = doc["kiPitch"];
+            float kdPitch = doc["kdPitch"];
+            drone.setPIDTunings(kpRoll, kiRoll, kdRoll, kpPitch, kiPitch, kdPitch);
+        }
+
+        // Parse motor speed slider
+        if (doc.containsKey("motorSpeed")) {
+            float speed = doc["motorSpeed"];
+            float speeds[4] = {speed, speed, speed, speed};
+            drone.setMotorSpeeds(speeds);
+        }
+
+        // Parse arm/disarm
+        if (doc.containsKey("arm")) {
+            if (doc["arm"]) {
+                drone.arm();
+            } else {
+                drone.disarm();
+            }
+        }
+    }
+}
+
+void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
+    if (type == WS_EVT_CONNECT) {
+        Serial.println("WebSocket client connected");
+    } else if (type == WS_EVT_DISCONNECT) {
+        Serial.println("WebSocket client disconnected");
+    } else if (type == WS_EVT_DATA) {
+        handleWebSocketMessage(arg, data, len);
     }
 }
 
 void setup() {
     Serial.begin(115200);
-    while (!Serial) {
-        ; // Wait for serial port to connect
-    }
 
-    if (!initMPU6050()) {
-        Serial.println("Failed to initialize MPU-6050");
+    // Initialize SPIFFS
+    if (!SPIFFS.begin(true)) {
+        Serial.println("Failed to mount SPIFFS");
         while (1) {
             delay(1000);
         }
     }
-    Serial.println("MPU-6050 initialized");
 
-    float gxOffset = 0.0f, gyOffset = 0.0f, gzOffset = 0.0f;
-    calibrateGyro(gxOffset, gyOffset, gzOffset);
+    // Configure WiFi as Access Point
+    WiFi.softAP(ssid, password);
+    IPAddress IP = WiFi.softAPIP();
+    Serial.print("AP SSID: ");
+    Serial.println(ssid);
+    Serial.print("AP IP address: ");
+    Serial.println(IP);
 
-    delay(100);
+    // Initialize sensor and drone
+    if (!sensor.begin() || !drone.begin()) {
+        Serial.println("Initialization failed");
+        while (1) {
+            delay(1000);
+        }
+    }
+
+    // Web server routes
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(SPIFFS, "/index.html", "text/html");
+    });
+
+    // WebSocket
+    ws.onEvent(onWsEvent);
+    server.addHandler(&ws);
+    server.begin();
 }
 
 void loop() {
-    static unsigned long lastUpdate = 0;
-    static float gxOffset = 0.0f, gyOffset = 0.0f, gzOffset = 0.0f;
-    static float gxAvg = 0.0f, gyAvg = 0.0f, gzAvg = 0.0f;
-    static int sampleCount = 0;
-    static const int avgSamples = 10;
-    static unsigned long lastStationaryTime = 0;
-    static bool isStationary = false;
+    static unsigned long lastWsUpdate = 0;
+    float roll, pitch, yaw;
 
-    unsigned long now = micros();
-    if (now - lastUpdate >= 10000) { // 100 Hz
-        float ax, ay, az, gx, gy, gz;
+    // Control loop at 100 Hz
+    if (sensor.getAngles(roll, pitch, yaw)) {
+        drone.update(roll, pitch, yaw, rollSetpoint, pitchSetpoint, throttle, yawSetpoint);
 
-        if (readMPU6050(ax, ay, az, gx, gy, gz, gxOffset, gyOffset, gzOffset)) {
-            // Update moving average for gyro
-            gxAvg = (gxAvg * sampleCount + gx) / (sampleCount + 1);
-            gyAvg = (gyAvg * sampleCount + gy) / (sampleCount + 1);
-            gzAvg = (gzAvg * sampleCount + gz) / (sampleCount + 1);
-            sampleCount = min(sampleCount + 1, avgSamples);
+        // Send data to WebSocket clients at 10 Hz
+        if (millis() - lastWsUpdate >= 100) {
+            float motorSpeeds[4];
+            drone.getMotorSpeeds(motorSpeeds);
 
-            // Check if stationary
-            if (fabs(gxAvg) < 0.1f && fabs(gyAvg) < 0.1f && fabs(gzAvg) < 0.1f) {
-                if (!isStationary) {
-                    lastStationaryTime = millis();
-                    isStationary = true;
-                }
-                if (millis() - lastStationaryTime >= 1000) { // 1 second stationary
-                    filter.resetAngles(ax, ay, -az); // Invert az for reset
-                    sampleCount = 0;
-                    gxAvg = gyAvg = gzAvg = 0.0f;
-                }
-                static unsigned long lastStationaryDebug = 0;
-                if (millis() - lastStationaryDebug >= 500) {
-                    Serial.println("Stationary: Skipping filter update");
-                    lastStationaryDebug = millis();
-                }
-            } else {
-                isStationary = false;
-                filter.update(gx, gy, gz, ax, ay, -az); // Invert az for update
-            }
+            DynamicJsonDocument doc(512);
+            doc["roll"] = roll;
+            doc["pitch"] = pitch;
+            doc["yaw"] = yaw;
+            doc["motor1"] = motorSpeeds[0];
+            doc["motor2"] = motorSpeeds[1];
+            doc["motor3"] = motorSpeeds[2];
+            doc["motor4"] = motorSpeeds[3];
+            doc["armed"] = drone.isArmed();
 
-            float roll, pitch, yaw;
-            filter.getEulerAngles(roll, pitch, yaw);
+            String output;
+            serializeJson(doc, output);
+            ws.textAll(output);
 
-            Serial.print("Roll: "); Serial.print(roll, 2);
-            Serial.print(" Pitch: "); Serial.print(pitch, 2);
-            Serial.print(" Yaw: "); Serial.println(yaw, 2);
-        } else {
-            Serial.println("Failed to read MPU-6050");
+            lastWsUpdate = millis();
         }
-
-        lastUpdate = now;
     }
+
+    // Clean up WebSocket clients
+    ws.cleanupClients();
 }

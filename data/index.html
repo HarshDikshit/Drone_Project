@@ -1,127 +1,179 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Drone Control Interface</title>
+    <title>Drone Control</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script src="https://cdn.jsdelivr.net/npm/nipplejs@0.10.0/dist/nipplejs.min.js"></script>
     <style>
         body {
             font-family: Arial, sans-serif;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            background-color: #f0f0f0;
             margin: 0;
-            padding: 10px;
+            padding: 20px;
+            background-color: #f0f0f0;
         }
         .container {
-            max-width: 600px;
-            width: 100%;
-            background: white;
-            padding: 20px;
-            border-radius: 10px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .joystick-container {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 20px;
+        }
+        .joystick {
+            width: 150px;
+            height: 150px;
+            background: #ddd;
+            border-radius: 50%;
         }
         .controls {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 10px;
+            margin-bottom: 20px;
         }
-        .control {
-            display: flex;
-            flex-direction: column;
+        .slider-container {
+            margin: 10px 0;
         }
-        label {
-            font-weight: bold;
-            margin-bottom: 5px;
-        }
-        input[type="range"] {
-            width: 100%;
-        }
-        .status {
-            margin-top: 20px;
+        .data-display {
+            background: white;
             padding: 10px;
-            background: #e0e0e0;
             border-radius: 5px;
         }
-        .status p {
-            margin: 5px 0;
-        }
         button {
-            margin-top: 10px;
-            padding: 10px;
+            padding: 10px 20px;
+            margin: 5px;
             background: #007bff;
             color: white;
             border: none;
             border-radius: 5px;
             cursor: pointer;
         }
-        button:hover {
-            background: #0056b3;
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Drone Control</h1>
-        <div class="controls">
-            <div class="control">
-                <label for="throttle">Throttle (%)</label>
-                <input type="range" id="throttle" min="0" max="100" value="0">
-            </div>
-            <div class="control">
-                <label for="pitch">Pitch (°)</label>
-                <input type="range" id="pitch" min="-30" max="30" value="0">
-            </div>
-            <div class="control">
-                <label for="roll">Roll (°)</label>
-                <input type="range" id="roll" min="-30" max="30" value="0">
-            </div>
-            <div class="control">
-                <label for="yaw">Yaw (°/s)</label>
-                <input type="range" id="yaw" min="-90" max="90" value="0">
-            </div>
+        <div class="joystick-container">
+            <div id="throttle-yaw" class="joystick"></div>
+            <div id="roll-pitch" class="joystick"></div>
         </div>
-        <button onclick="sendControls()">Send Controls</button>
-        <div class="status">
-            <p>Battery: <span id="battery">0</span>%</p>
-            <p>Connection: <span id="connection">Disconnected</span></p>
+        <div class="controls">
+            <button id="arm" onclick="sendArm(true)">Arm</button>
+            <button id="disarm" onclick="sendArm(false)">Disarm</button>
+        </div>
+        <div class="slider-container">
+            <label>Motor Speed (1000–2000 µs): <span id="motorSpeedValue">1000</span></label>
+            <input type="range" id="motorSpeed" min="1000" max="2000" value="1000">
+        </div>
+        <div class="slider-container">
+            <label>Roll Kp: <span id="kpRollValue">2.0</span></label>
+            <input type="range" id="kpRoll" min="0" max="10" step="0.1" value="2.0">
+            <label>Roll Ki: <span id="kiRollValue">0.1</span></label>
+            <input type="range" id="kiRoll" min="0" max="1" step="0.01" value="0.1">
+            <label>Roll Kd: <span id="kdRollValue">0.5</span></label>
+            <input type="range" id="kdRoll" min="0" max="5" step="0.1" value="0.5">
+        </div>
+        <div class="slider-container">
+            <label>Pitch Kp: <span id="kpPitchValue">2.0</span></label>
+            <input type="range" id="kpPitch" min="0" max="10" step="0.1" value="2.0">
+            <label>Pitch Ki: <span id="kiPitchValue">0.1</span></label>
+            <input type="range" id="kiPitch" min="0" max="1" step="0.01" value="0.1">
+            <label>Pitch Kd: <span id="kdPitchValue">0.5</span></label>
+            <input type="range" id="kdPitch" min="0" max="5" step="0.1" value="0.5">
+        </div>
+        <div class="data-display">
+            <p>Roll: <span id="roll">0</span>°</p>
+            <p>Pitch: <span id="pitch">0</span>°</p>
+            <p>Yaw: <span id="yaw">0</span>°</p>
+            <p>Motor 1: <span id="motor1">1000</span> µs</p>
+            <p>Motor 2: <span id="motor2">1000</span> µs</p>
+            <p>Motor 3: <span id="motor3">1000</span> µs</p>
+            <p>Motor 4: <span id="motor4">1000</span> µs</p>
+            <p>Armed: <span id="armed">false</span></p>
         </div>
     </div>
 
     <script>
-        let ws = new WebSocket(`ws://${window.location.hostname}:81`);
-
-        ws.onopen = () => {
-            console.log("WebSocket Connected");
-            document.getElementById("connection").textContent = "Connected";
-        };
-
-        ws.onmessage = (event) => {
+        let ws = new WebSocket(`ws://${window.location.hostname}/ws`);
+        ws.onmessage = function(event) {
             const data = JSON.parse(event.data);
-            document.getElementById("battery").textContent = data.battery.toFixed(1);
-            document.getElementById("connection").textContent = data.connected ? "Connected" : "Disconnected";
+            document.getElementById('roll').textContent = data.roll.toFixed(2);
+            document.getElementById('pitch').textContent = data.pitch.toFixed(2);
+            document.getElementById('yaw').textContent = data.yaw.toFixed(2);
+            document.getElementById('motor1').textContent = data.motor1.toFixed(0);
+            document.getElementById('motor2').textContent = data.motor2.toFixed(0);
+            document.getElementById('motor3').textContent = data.motor3.toFixed(0);
+            document.getElementById('motor4').textContent = data.motor4.toFixed(0);
+            document.getElementById('armed').textContent = data.armed;
+            document.getElementById('arm').disabled = data.armed;
+            document.getElementById('disarm').disabled = !data.armed;
         };
 
-        ws.onclose = () => {
-            console.log("WebSocket Disconnected");
-            document.getElementById("connection").textContent = "Disconnected";
-        };
+        // Joysticks
+        const throttleYaw = nipplejs.create({
+            zone: document.getElementById('throttle-yaw'),
+            mode: 'static',
+            position: { left: '50%', top: '50%' },
+            color: 'blue'
+        });
+        throttleYaw.on('move', (evt, data) => {
+            if (data.direction) {
+                const throttle = Math.min(100, Math.max(0, (data.distance / 50) * 100));
+                const yaw = data.angle.degree > 180 ? -(360 - data.angle.degree) : data.angle.degree;
+                sendControls({ throttle, yaw: yaw / 3.6 }); // Scale to ±50°/s
+            }
+        });
+        throttleYaw.on('end', () => {
+            sendControls({ throttle: 0, yaw: 0 });
+        });
 
-        function sendControls() {
-            const controls = {
-                throttle: parseFloat(document.getElementById("throttle").value),
-                pitch: parseFloat(document.getElementById("pitch").value),
-                roll: parseFloat(document.getElementById("roll").value),
-                yaw: parseFloat(document.getElementById("yaw").value)
+        const rollPitch = nipplejs.create({
+            zone: document.getElementById('roll-pitch'),
+            mode: 'static',
+            position: { left: '50%', top: '50%' },
+            color: 'red'
+        });
+        rollPitch.on('move', (evt, data) => {
+            if (data.direction) {
+                const roll = (data.angle.degree - 90) / 1.8; // Scale to ±50°
+                const pitch = (data.distance / 50) * 50 * (data.angle.degree > 90 && data.angle.degree < 270 ? -1 : 1);
+                sendControls({ roll, pitch });
+            }
+        });
+        rollPitch.on('end', () => {
+            sendControls({ roll: 0, pitch: 0 });
+        });
+
+        // Sliders
+        function updateSlider(id, valueId) {
+            const slider = document.getElementById(id);
+            const value = document.getElementById(valueId);
+            slider.oninput = () => {
+                value.textContent = slider.value;
+                sendControls({
+                    [id]: parseFloat(slider.value)
+                });
             };
-            ws.send(JSON.stringify(controls));
+        }
+        updateSlider('motorSpeed', 'motorSpeedValue');
+        updateSlider('kpRoll', 'kpRollValue');
+        updateSlider('kiRoll', 'kiRollValue');
+        updateSlider('kdRoll', 'kdRollValue');
+        updateSlider('kpPitch', 'kpPitchValue');
+        updateSlider('kiPitch', 'kiPitchValue');
+        updateSlider('kdPitch', 'kdPitchValue');
+
+        function sendControls(data) {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(data));
+            }
         }
 
-        // Send controls on slider change for real-time control
-        document.querySelectorAll("input[type='range']").forEach(input => {
-            input.addEventListener("input", sendControls);
-        });
+        function sendArm(arm) {
+            sendControls({ arm });
+        }
     </script>
 </body>
 </html>
