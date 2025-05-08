@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drone Control Interface</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #f0f0f0;
+            margin: 0;
+            padding: 10px;
+        }
+        .container {
+            max-width: 600px;
+            width: 100%;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+        .control {
+            display: flex;
+            flex-direction: column;
+        }
+        label {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        input[type="range"] {
+            width: 100%;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 10px;
+            background: #e0e0e0;
+            border-radius: 5px;
+        }
+        .status p {
+            margin: 5px 0;
+        }
+        button {
+            margin-top: 10px;
+            padding: 10px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Drone Control</h1>
+        <div class="controls">
+            <div class="control">
+                <label for="throttle">Throttle (%)</label>
+                <input type="range" id="throttle" min="0" max="100" value="0">
+            </div>
+            <div class="control">
+                <label for="pitch">Pitch (°)</label>
+                <input type="range" id="pitch" min="-30" max="30" value="0">
+            </div>
+            <div class="control">
+                <label for="roll">Roll (°)</label>
+                <input type="range" id="roll" min="-30" max="30" value="0">
+            </div>
+            <div class="control">
+                <label for="yaw">Yaw (°/s)</label>
+                <input type="range" id="yaw" min="-90" max="90" value="0">
+            </div>
+        </div>
+        <button onclick="sendControls()">Send Controls</button>
+        <div class="status">
+            <p>Battery: <span id="battery">0</span>%</p>
+            <p>Connection: <span id="connection">Disconnected</span></p>
+        </div>
+    </div>
+
+    <script>
+        let ws = new WebSocket(`ws://${window.location.hostname}:81`);
+
+        ws.onopen = () => {
+            console.log("WebSocket Connected");
+            document.getElementById("connection").textContent = "Connected";
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            document.getElementById("battery").textContent = data.battery.toFixed(1);
+            document.getElementById("connection").textContent = data.connected ? "Connected" : "Disconnected";
+        };
+
+        ws.onclose = () => {
+            console.log("WebSocket Disconnected");
+            document.getElementById("connection").textContent = "Disconnected";
+        };
+
+        function sendControls() {
+            const controls = {
+                throttle: parseFloat(document.getElementById("throttle").value),
+                pitch: parseFloat(document.getElementById("pitch").value),
+                roll: parseFloat(document.getElementById("roll").value),
+                yaw: parseFloat(document.getElementById("yaw").value)
+            };
+            ws.send(JSON.stringify(controls));
+        }
+
+        // Send controls on slider change for real-time control
+        document.querySelectorAll("input[type='range']").forEach(input => {
+            input.addEventListener("input", sendControls);
+        });
+    </script>
+</body>
+</html>
